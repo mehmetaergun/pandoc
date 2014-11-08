@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-
-Copyright (C) 2007-2010 John MacFarlane <jgm@berkeley.edu>
+Copyright (C) 2007-2014 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +19,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.ConTeXt
-   Copyright   : Copyright (C) 2007-2010 John MacFarlane
+   Copyright   : Copyright (C) 2007-2014 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -35,7 +35,8 @@ import Text.Pandoc.Writers.Shared
 import Text.Pandoc.Options
 import Text.Pandoc.Walk (query)
 import Text.Printf ( printf )
-import Data.List ( intercalate, isPrefixOf )
+import Data.List ( intercalate )
+import Data.Char ( ord )
 import Control.Monad.State
 import Text.Pandoc.Pretty
 import Text.Pandoc.Templates ( renderTemplate' )
@@ -113,6 +114,13 @@ escapeCharForConTeXt opts ch =
 -- | Escape string for ConTeXt
 stringToConTeXt :: WriterOptions -> String -> String
 stringToConTeXt opts = concatMap (escapeCharForConTeXt opts)
+
+-- | Sanitize labels
+toLabel :: String -> String
+toLabel z = concatMap go z
+ where go x
+         | elem x "\\#[]\",{}%()|=" = "ux" ++ printf "%x" (ord x)
+         | otherwise = [x]
 
 -- | Convert Elements to ConTeXt
 elementToConTeXt :: WriterOptions -> Element -> State WriterState Doc
@@ -283,38 +291,33 @@ inlineToConTeXt (RawInline "tex" str) = return $ text str
 inlineToConTeXt (RawInline _ _) = return empty
 inlineToConTeXt (LineBreak) = return $ text "\\crlf" <> cr
 inlineToConTeXt Space = return space
--- autolink
-inlineToConTeXt (Link [Str str] (src, tit))
-  | if "mailto:" `isPrefixOf` src
-    then src == escapeURI ("mailto:" ++ str)
-    else src == escapeURI str =
-  inlineToConTeXt (Link
-    [RawInline "context" "\\hyphenatedurl{", Str str, RawInline "context" "}"]
-    (src, tit))
 -- Handle HTML-like internal document references to sections
 inlineToConTeXt (Link txt          (('#' : ref), _)) = do
   opts <- gets stOptions
-  label <-  inlineListToConTeXt txt
+  contents <-  inlineListToConTeXt txt
+  let ref' = toLabel $ stringToConTeXt opts ref
   return $ text "\\in"
            <> braces (if writerNumberSections opts
-                         then label <+> text "(\\S"
-                         else label)  -- prefix
+                         then contents <+> text "(\\S"
+                         else contents)  -- prefix
            <> braces (if writerNumberSections opts
                          then text ")"
                          else empty)  -- suffix
-           <> brackets (text ref)
+           <> brackets (text ref')
 
 inlineToConTeXt (Link txt          (src, _))      = do
+  let isAutolink = txt == [Str (unEscapeString src)]
   st <- get
   let next = stNextRef st
   put $ st {stNextRef = next + 1}
   let ref = "url" ++ show next
-  label <-  inlineListToConTeXt txt
+  contents <-  inlineListToConTeXt txt
   return $ "\\useURL"
            <> brackets (text ref)
            <> brackets (text $ escapeStringUsing [('#',"\\#"),('%',"\\%")] src)
-           <> brackets empty
-           <> brackets label
+           <> (if isAutolink
+                  then empty
+                  else brackets empty <> brackets contents)
            <> "\\from"
            <> brackets (text ref)
 inlineToConTeXt (Image _ (src, _)) = do
@@ -343,6 +346,7 @@ sectionHeader (ident,classes,_) hdrLevel lst = do
   st <- get
   let opts = stOptions st
   let level' = if writerChapters opts then hdrLevel - 1 else hdrLevel
+  let ident' = toLabel ident
   let (section, chapter) = if "unnumbered" `elem` classes
                               then (text "subject", text "title")
                               else (text "section", text "chapter")
@@ -350,7 +354,7 @@ sectionHeader (ident,classes,_) hdrLevel lst = do
                then char '\\'
                     <> text (concat (replicate (level' - 1) "sub"))
                     <> section
-                    <> (if (not . null) ident then brackets (text ident) else empty)
+                    <> (if (not . null) ident' then brackets (text ident') else empty)
                     <> braces contents
                     <> blankline
                else if level' == 0

@@ -1,6 +1,7 @@
-{-# LANGUAGE OverlappingInstances, FlexibleInstances, OverloadedStrings #-}
+{-# LANGUAGE OverlappingInstances, FlexibleInstances, OverloadedStrings,
+    ScopedTypeVariables #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-{- Copyright (C) 2012 John MacFarlane <jgm@berkeley.edu>
+{- Copyright (C) 2012-2014 John MacFarlane <jgm@berkeley.edu>
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,7 +20,7 @@ Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 {- |
    Module      : Text.Pandoc.Writers.Custom
-   Copyright   : Copyright (C) 2012 John MacFarlane
+   Copyright   : Copyright (C) 2012-2014 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -35,12 +36,14 @@ import Text.Pandoc.Options
 import Data.List ( intersperse )
 import Data.Char ( toLower )
 import Scripting.Lua (LuaState, StackValue, callfunc)
+import Text.Pandoc.Writers.Shared
 import qualified Scripting.Lua as Lua
 import Text.Pandoc.UTF8 (fromString, toString)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as C8
 import Data.Monoid
 import qualified Data.Map as M
+import Text.Pandoc.Templates
 
 attrToMap :: Attr -> M.Map ByteString ByteString
 attrToMap (id',classes,keyvals) = M.fromList
@@ -128,18 +131,41 @@ instance StackValue MetaValue where
   valuetype (MetaInlines _) = Lua.TSTRING
   valuetype (MetaBlocks _) = Lua.TSTRING
 
+instance StackValue Citation where
+  push lua cit = do
+    Lua.createtable lua 6 0
+    let addValue ((k :: String), v) = Lua.push lua k >> Lua.push lua v >>
+                          Lua.rawset lua (-3)
+    addValue ("citationId", citationId cit)
+    addValue ("citationPrefix", citationPrefix cit)
+    addValue ("citationSuffix", citationSuffix cit)
+    addValue ("citationMode", show (citationMode cit))
+    addValue ("citationNoteNum", citationNoteNum cit)
+    addValue ("citationHash", citationHash cit)
+  peek = undefined
+  valuetype _ = Lua.TTABLE
+
 -- | Convert Pandoc to custom markup.
 writeCustom :: FilePath -> WriterOptions -> Pandoc -> IO String
-writeCustom luaFile opts doc = do
-  luaScript <- readFile luaFile
+writeCustom luaFile opts doc@(Pandoc meta _) = do
+  luaScript <- C8.unpack `fmap` C8.readFile luaFile
   lua <- Lua.newstate
   Lua.openlibs lua
   Lua.loadstring lua luaScript "custom"
   Lua.call lua 0 0
   -- TODO - call hierarchicalize, so we have that info
   rendered <- docToCustom lua opts doc
+  context <- metaToJSON opts
+             (fmap toString . blockListToCustom lua)
+             (fmap toString . inlineListToCustom lua)
+             meta
   Lua.close lua
-  return $ toString rendered
+  let body = toString rendered
+  if writerStandalone opts
+     then do
+       let context' = setField "body" body context
+       return $ renderTemplate' (writerTemplate opts) context'
+     else return body
 
 docToCustom :: LuaState -> WriterOptions -> Pandoc -> IO ByteString
 docToCustom lua opts (Pandoc (Meta metamap) blocks) = do
@@ -225,7 +251,7 @@ inlineToCustom lua (Quoted SingleQuote lst) = callfunc lua "SingleQuoted" lst
 
 inlineToCustom lua (Quoted DoubleQuote lst) = callfunc lua "DoubleQuoted" lst
 
-inlineToCustom lua (Cite _  lst) = callfunc lua "Cite" lst
+inlineToCustom lua (Cite cs lst) = callfunc lua "Cite" lst cs
 
 inlineToCustom lua (Code attr str) =
   callfunc lua "Code" (fromString str) (attrToMap attr)
